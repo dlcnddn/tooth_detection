@@ -1,13 +1,12 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse
-from functools import lru_cache
-import tempfile
 import os
+import base64
+import requests
 
 app = FastAPI(title="Tooth Detection API")
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def root():
     return {"message": "server running"}
 
@@ -17,54 +16,51 @@ def health():
     return {"status": "ok"}
 
 
-@lru_cache(maxsize=1)
-def get_model():
-    """
-    무거운 import와 모델 로드를 서버 시작 시점이 아니라
-    첫 추론 요청 시점으로 미룬다.
-    """
-    try:
-        from inference import get_model
-
-        model_id = os.getenv("ROBOFLOW_MODEL_ID")
-        api_key = os.getenv("ROBOFLOW_API_KEY")
-
-        if not model_id or not api_key:
-            raise ValueError("ROBOFLOW_MODEL_ID 또는 ROBOFLOW_API_KEY가 설정되지 않았다.")
-
-        model = get_model(model_id=model_id, api_key=api_key)
-        return model
-
-    except Exception as e:
-        raise RuntimeError(f"모델 로드 실패: {str(e)}")
-
-
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="이미지 파일만 업로드 가능하다.")
 
-    suffix = os.path.splitext(file.filename)[1] if file.filename else ".jpg"
+    model_id = os.getenv("ROBOFLOW_MODEL_ID")
+    api_key = os.getenv("ROBOFLOW_API_KEY")
+
+    if not model_id or not api_key:
+        raise HTTPException(status_code=500, detail="ROBOFLOW_MODEL_ID 또는 ROBOFLOW_API_KEY가 설정되지 않았다.")
 
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            contents = await file.read()
-            tmp.write(contents)
-            temp_path = tmp.name
+        # model_id 예: tooth-detection/3
+        image_bytes = await file.read()
+        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
-        model = get_model()
-        result = model.infer(temp_path)
+        url = f"https://detect.roboflow.com/{model_id}"
+        params = {
+            "api_key": api_key
+        }
 
-        return JSONResponse(
-            content={
-                "filename": file.filename,
-                "result": result,
-            }
+        response = requests.post(
+            url,
+            params=params,
+            data=image_b64,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=60,
         )
 
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Roboflow API 오류: {response.status_code} / {response.text}"
+            )
+
+        result = response.json()
+
+        return {
+            "filename": file.filename,
+            "result": result
+        }
+
+    except HTTPException:
+        raise
+    except requests.Timeout:
+        raise HTTPException(status_code=504, detail="추론 요청 시간이 초과되었다.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"추론 실패: {str(e)}")
-
-    finally:
-        if "temp_path" in locals() and os.path.exists(temp_path):
-            os.remove(temp_path)
