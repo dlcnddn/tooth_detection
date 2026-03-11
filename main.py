@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 import cv2
 import numpy as np
 from inference import get_model
@@ -6,19 +6,26 @@ import os
 
 app = FastAPI()
 
-# Roboflow 모델 ID
 MODEL_ID = "cavity-pvbhl/1"
-
-# Render 환경변수에 넣어둘 API 키
 API_KEY = os.getenv("ROBOFLOW_API_KEY")
-if not API_KEY:
-    raise RuntimeError("ROBOFLOW_API_KEY 환경변수가 설정되지 않았습니다.")
 
-# 모델 로드
-model = get_model(
-    model_id=MODEL_ID,
-    api_key=API_KEY
-)
+model = None
+
+def get_loaded_model():
+    global model
+
+    if not API_KEY:
+        raise RuntimeError("ROBOFLOW_API_KEY 환경변수가 설정되지 않았습니다.")
+
+    if model is None:
+        print("loading model...")
+        model = get_model(
+            model_id=MODEL_ID,
+            api_key=API_KEY
+        )
+        print("model loaded")
+
+    return model
 
 @app.get("/")
 def root():
@@ -26,8 +33,9 @@ def root():
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-    contents = await file.read()
+    current_model = get_loaded_model()
 
+    contents = await file.read()
     nparr = np.frombuffer(contents, np.uint8)
     image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
@@ -41,7 +49,7 @@ async def predict(file: UploadFile = File(...)):
             "error": "이미지를 읽을 수 없습니다."
         }
 
-    results = model.infer(image)
+    results = current_model.infer(image)
     result = results[0]
 
     response_data = {
